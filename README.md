@@ -70,3 +70,27 @@ arbi-pred/
 ├── requirements.txt       # Python dependencies
 └── README.md
 ```
+## Auto-Trading Setup
+
+The dashboard now includes an automated execution layer that buys "Yes" (if bullish) or "No" (if bearish) contracts when the **Trend Score is ≥ 8/10**.
+
+### 1. Safety First
+- **Dry Run Mode**: Enabled by default. Trades are logged but not executed.
+- **Risk Limits**: Max $5 per trade, Max $15 daily loss.
+- **Filters**:
+  - Score ≥ 8 (Strict conviction)
+  - OBI > 0.65 (Strong order book imbalance)
+  - Price between 20¢ - 58¢ (Avoid overbought/dead markets)
+
+### 2. Configuration (`.env`)
+Create a `.env` file in the root directory:
+```bash
+PRIVATE_KEY=0x...      # Your Polygon private key (Export from Phantom)
+DRY_RUN=True           # Set to False to enable live trading
+```
+
+### 3. Run
+```bash
+python main.py
+```
+*Auto-trades will appear in the console logs and `trade_log.txt`.*
