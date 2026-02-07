@@ -1,5 +1,3 @@
-import time
-
 from rich.table   import Table
 from rich.panel   import Panel
 from rich.console import Group
@@ -105,6 +103,7 @@ def _header(st, coin, tf):
 
     parts.append(("\n", ""))
     parts.append(("  Polymarket Crypto Assistant", "dim white"))
+    parts.append(("  |  @SolSt1ne", "dim cyan"))
 
     return Panel(
         Text.assemble(*parts),
@@ -319,90 +318,6 @@ def _signals_panel(st):
     return Panel("\n".join(sigs), title="SIGNALS", box=bx.ROUNDED, expand=True)
 
 
-def _fv_panel(st, tf):
-    """Fair Value panel for 15m binary options."""
-    if tf != "15m":
-        return Panel("[dim]Fair value analysis available for 15m timeframe only[/dim]",
-                     title="FAIR VALUE", box=bx.ROUNDED, expand=True)
-
-    t = Table(box=None, show_header=False, pad_edge=False, expand=True)
-    t.add_column("label", style="dim", width=20)
-    t.add_column("value",              width=16)
-    t.add_column("detail",             width=28)
-
-    # period countdown
-    if st.period_start_ts > 0:
-        remaining = max(0, st.period_end_ts - time.time())
-        mins = int(remaining) // 60
-        secs = int(remaining) % 60
-        pct_elapsed = 1.0 - remaining / 900
-        bar_len = int(pct_elapsed * 14)
-        bar = "█" * bar_len + "░" * (14 - bar_len)
-        t.add_row("Period", f"[bold]{mins:02d}:{secs:02d}[/bold] left", f"[cyan]{bar}[/cyan]")
-    else:
-        t.add_row("Period", "[dim]waiting…[/dim]", "")
-
-    # strike and current price
-    t.add_row("Current (S)", _p(st.mid), "")
-    if st.strike is not None:
-        diff = st.mid - st.strike
-        dc = "green" if diff >= 0 else "red"
-        # show "oracle" or "est." source tag
-        src = "[dim]oracle[/dim]" if st.strike_is_oracle else "[yellow]est.[/yellow]"
-        t.add_row("Strike  (K)", _p(st.strike),
-                  f"[{dc}]{diff:+.2f}[/{dc}]  {src}")
-    else:
-        t.add_row("Strike  (K)", "[dim]waiting…[/dim]", "")
-
-    # volatility
-    sigma = ind.yang_zhang_vol(st.klines, config.FV_VOL_WINDOW)
-    if sigma is not None:
-        t.add_row("Volatility", f"{sigma * 100:.1f}% ann.", f"[dim]YZ {config.FV_VOL_WINDOW}-bar[/dim]")
-    else:
-        t.add_row("Volatility", "[dim]insufficient data[/dim]", "")
-
-    t.add_row("[dim]───────────────[/dim]", "[dim]───────────────[/dim]", "[dim]───────────────[/dim]")
-
-    # fair value
-    remaining_sec = max(0, st.period_end_ts - time.time()) if st.period_end_ts else 0
-    fv_up, fv_dn = ind.fair_value(st.mid, st.strike, sigma, remaining_sec)
-
-    if fv_up is not None:
-        t.add_row("Fair Value ↑", f"[bold]{fv_up:.3f}[/bold]", "")
-        t.add_row("Fair Value ↓", f"[bold]{fv_dn:.3f}[/bold]", "")
-
-        # edge vs polymarket
-        if st.pm_up is not None and st.pm_dn is not None:
-            # sanity check: PM prices should be in (0.02, 0.98) range
-            pm_sane = 0.02 < st.pm_up < 0.98 and 0.02 < st.pm_dn < 0.98
-            edge_up = fv_up - st.pm_up
-            edge_dn = fv_dn - st.pm_dn
-
-            eu_col = "green" if edge_up > 0 else "red"
-            ed_col = "green" if edge_dn > 0 else "red"
-            t.add_row("PM ↑ price", f"{st.pm_up:.3f}",
-                      f"[{eu_col}]edge {edge_up:+.3f}[/{eu_col}]")
-            t.add_row("PM ↓ price", f"{st.pm_dn:.3f}",
-                      f"[{ed_col}]edge {edge_dn:+.3f}[/{ed_col}]")
-
-            # directional signal (only if PM prices look sane)
-            if not pm_sane:
-                signal = "[yellow]PM prices stale – waiting…[/yellow]"
-            elif edge_up > config.FV_EDGE_THRESH:
-                signal = f"[bold green]>>> BUY UP ({edge_up:+.3f} edge) <<<[/bold green]"
-            elif edge_dn > config.FV_EDGE_THRESH:
-                signal = f"[bold green]>>> BUY DOWN ({edge_dn:+.3f} edge) <<<[/bold green]"
-            else:
-                signal = "[dim]NO EDGE[/dim]"
-            t.add_row("", "", signal)
-        else:
-            t.add_row("PM prices", "[dim]waiting…[/dim]", "")
-    else:
-        t.add_row("Fair Value", "[dim]waiting for data…[/dim]", "")
-
-    return Panel(t, title="FAIR VALUE", box=bx.ROUNDED, expand=True)
-
-
 def render(st, coin, tf) -> "_Group":
     header = _header(st, coin, tf)
 
@@ -414,4 +329,4 @@ def render(st, coin, tf) -> "_Group":
         _flow_panel(st),
     )
 
-    return _Group(header, grid, _fv_panel(st, tf), _signals_panel(st))
+    return _Group(header, grid, _signals_panel(st))
