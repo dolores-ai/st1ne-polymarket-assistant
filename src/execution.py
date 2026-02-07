@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from strategy import TradeSignal, Signal
+from strategy import TradeSignal, Signal, ExitType
 
 
 # ── Trade log ────────────────────────────────────────────────
@@ -33,7 +33,7 @@ class TradeRecord:
     """Immutable record of a trade."""
     timestamp: str
     period_ts: int
-    signal_type: str  # "reversal" or "trend_confirm"
+    signal_type: str  # "momentum_scalp"
     side: str         # "Up" or "Down"
     entry_price: float
     entry_minute: float
@@ -42,7 +42,8 @@ class TradeRecord:
     status: str       # "paper", "posted", "filled", "cancelled", "failed"
     confidence: str
     outcome: str | None = None     # "won", "lost", None (pending)
-    settlement: float | None = None
+    exit_type: str | None = None   # "tp", "sl", "deadline", "settlement"
+    exit_price: float | None = None
     pnl: float | None = None
 
 
@@ -69,12 +70,13 @@ class BotState:
         self.trades.append(rec)
         _append_log(rec)
 
-    def record_outcome(self, won: bool, pnl: float):
+    def record_outcome(self, won: bool, pnl: float, exit_type: str = "settlement", exit_price: float | None = None):
         if self.trades:
             last = self.trades[-1]
             last.outcome = "won" if won else "lost"
             last.pnl = pnl
-            last.settlement = 1.0 if won else 0.0
+            last.exit_type = exit_type
+            last.exit_price = exit_price
         self.total_pnl += pnl
         if won:
             self.wins += 1
@@ -105,6 +107,8 @@ def _append_log(rec: TradeRecord):
         "status": rec.status,
         "confidence": rec.confidence,
         "outcome": rec.outcome,
+        "exit_type": rec.exit_type,
+        "exit_price": rec.exit_price,
         "pnl": rec.pnl,
     }
 
@@ -141,8 +145,30 @@ class PaperExecutor:
         self.bot.record_trade(rec)
         return rec
 
+    def exit_position(self, exit_type: ExitType, current_price: float):
+        """Exit the current position at current market price (TP/SL/deadline).
+
+        Args:
+            exit_type: Why we're exiting (TAKE_PROFIT, STOP_LOSS, DEADLINE)
+            current_price: Current PM price for our side
+        """
+        if not self.bot.current_side:
+            return
+
+        entry = self.bot.trades[-1].entry_price if self.bot.trades else 0.5
+        shares = self.size_usd / entry
+        pnl = shares * (current_price - entry)
+        won = pnl > 0
+
+        self.bot.record_outcome(won, pnl, exit_type=exit_type.value, exit_price=current_price)
+        self.bot.clear_position()
+
     def settle(self, outcome: str):
-        """Settle the current position. outcome = 'up' or 'down'."""
+        """Settle the current position via oracle. outcome = 'up' or 'down'.
+
+        NOTE: With TP/SL exits, this should rarely be called. Only used as
+        a safety fallback if somehow a position is held to settlement.
+        """
         if not self.bot.current_side:
             return
 
@@ -155,7 +181,7 @@ class PaperExecutor:
         shares = self.size_usd / entry
         pnl = shares * (settlement - entry)
 
-        self.bot.record_outcome(won, pnl)
+        self.bot.record_outcome(won, pnl, exit_type="settlement", exit_price=settlement)
         self.bot.clear_position()
 
     def cancel(self):
@@ -255,6 +281,25 @@ class LiveExecutor:
         self.bot.record_trade(rec)
         return rec
 
+    def exit_position(self, exit_type: ExitType, current_price: float):
+        """Exit the current position at current market price (TP/SL/deadline).
+
+        For live trading, this would place a sell order. For now, we compute
+        paper-style P&L as a placeholder until sell order logic is implemented.
+        """
+        if not self.bot.current_side:
+            return
+
+        # TODO: Place actual sell order via CLOB API
+        # For now: paper-style P&L calculation
+        entry = self.bot.trades[-1].entry_price if self.bot.trades else 0.5
+        shares = self.size_usd / entry
+        pnl = shares * (current_price - entry)
+        won = pnl > 0
+
+        self.bot.record_outcome(won, pnl, exit_type=exit_type.value, exit_price=current_price)
+        self.bot.clear_position()
+
     def settle(self, outcome: str):
         """Settle the current position based on market outcome."""
         if not self.bot.current_side:
@@ -269,7 +314,7 @@ class LiveExecutor:
         shares = self.size_usd / entry
         pnl = shares * (settlement - entry)
 
-        self.bot.record_outcome(won, pnl)
+        self.bot.record_outcome(won, pnl, exit_type="settlement", exit_price=settlement)
         self.bot.clear_position()
 
     def cancel(self):

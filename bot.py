@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-Polymarket BTC 15m Up/Down automated trading bot.
+Polymarket BTC 15m Up/Down automated trading bot — Momentum Scalp v2.
 
-Combined strategy: Trend Confirmation + Trend Reversal
-- At minute 7, check for leader flip since minute 5 → REVERSAL signal
-- If no flip, check trend confirmation (leader >= 0.60 AND trending from min 4) → TREND_CONFIRM
-- Maker-only execution (0% fees + rebates)
+Strategy: Buy leading side at minute 5 if trending, exit via TP/SL.
+- Entry: minute 5, leading side >= 0.60, price trending from minute 3
+- Take profit: +15¢  |  Stop loss: -5¢  |  Deadline: minute 14
+- No settlement dependency — exits within the period
+
+Backtest: 185 trades, 58% win, +5.6¢/trade, t=+8.18, split-half stable
 
 Usage:
-  # Paper trading (default — logs signals, no real orders):
-  python bot.py
-
-  # Paper trading with custom size:
-  python bot.py --size 25
-
-  # Live trading (requires PM_PRIVATE_KEY and PM_FUNDER env vars):
-  python bot.py --live --size 10
-
-  # Specify coin (default: BTC):
-  python bot.py --coin ETH
+  python bot.py                     # Paper trading (default)
+  python bot.py --size 25           # Paper trading with custom size
+  python bot.py --live --size 10    # Live trading
+  python bot.py --headless          # Server deployment (Railway)
 """
 
 import sys
@@ -166,13 +161,26 @@ def render_bot_dashboard(
     # Current signal / position
     if bot.current_side:
         last_trade = bot.trades[-1] if bot.trades else None
-        sig_type = last_trade.signal_type if last_trade else "?"
         entry = last_trade.entry_price if last_trade else 0
-        t.add_row("Position",
-                  f"[bold green]{bot.current_side}[/bold green] @ {entry:.3f}",
-                  f"[cyan]{sig_type}[/cyan]")
+        tp_target = entry + strategy.TAKE_PROFIT
+        sl_target = entry - strategy.STOP_LOSS
+
+        # Show current P&L
+        if state.pm_up is not None:
+            cur_price = state.pm_up if bot.current_side == "Up" else (1.0 - state.pm_up)
+            unrealized = cur_price - entry
+            pnl_col = "green" if unrealized > 0 else "red"
+            t.add_row("Position",
+                      f"[bold green]{bot.current_side}[/bold green] @ {entry:.3f}",
+                      f"[{pnl_col}]now {cur_price:.3f} ({unrealized:+.3f})[/{pnl_col}]")
+        else:
+            t.add_row("Position",
+                      f"[bold green]{bot.current_side}[/bold green] @ {entry:.3f}", "")
+        t.add_row("TP / SL",
+                  f"[green]TP {tp_target:.3f}[/green] / [red]SL {sl_target:.3f}[/red]",
+                  f"deadline min {strategy.DEADLINE_MINUTE:.0f}")
     elif strat_state.signal_fired:
-        t.add_row("Position", "[dim]signal fired, settled[/dim]", "")
+        t.add_row("Position", "[dim]signal fired, exited[/dim]", "")
     else:
         t.add_row("Position", "[dim]waiting for signal…[/dim]", "")
 
@@ -196,12 +204,13 @@ def render_bot_dashboard(
         t.add_row("[bold]Recent Trades[/bold]", "", "")
         for trade in bot.trades[-5:]:
             outcome_str = ""
+            exit_info = trade.exit_type or "pending"
             if trade.outcome == "won":
-                outcome_str = f"[green]✓ +${trade.pnl:+.2f}[/green]"
+                outcome_str = f"[green]✓ ${trade.pnl:+.2f}[/green] [{exit_info}]"
             elif trade.outcome == "lost":
-                outcome_str = f"[red]✗ ${trade.pnl:+.2f}[/red]"
+                outcome_str = f"[red]✗ ${trade.pnl:+.2f}[/red] [{exit_info}]"
             else:
-                outcome_str = "[yellow]pending[/yellow]"
+                outcome_str = "[yellow]open[/yellow]"
             t.add_row(
                 f"  {trade.side} @ {trade.entry_price:.3f}",
                 f"[dim]{trade.signal_type}[/dim]",
@@ -221,15 +230,13 @@ async def bot_loop(
     coin: str,
     strat_state: strategy.StrategyState,
 ):
-    """Main bot logic: snapshot collection, strategy evaluation, trade execution."""
+    """Main bot logic: snapshot collection, strategy evaluation, TP/SL exits."""
     last_period_ts = 0
     last_snapshot_minute = -1
-    pending_settlement_ts = 0
-    last_settlement_log = 0
 
     # Wait for feeds to populate
     await asyncio.sleep(5)
-    print("  [BOT] strategy loop started", flush=True)
+    print("  [BOT] strategy loop started (momentum scalp v2)", flush=True)
 
     while True:
         try:
@@ -237,9 +244,22 @@ async def bot_loop(
 
             # ── Period change detection ──
             if state.period_start_ts != last_period_ts and state.period_start_ts > 0:
-                # If we had a position from the previous period, settle it
+                # If we still have a position at period boundary, force deadline exit
                 if last_period_ts > 0 and executor.bot.current_side:
-                    pending_settlement_ts = last_period_ts
+                    if state.pm_up is not None:
+                        side = executor.bot.current_side
+                        exit_price = state.pm_up if side == "Up" else (1.0 - state.pm_up)
+                        executor.exit_position(strategy.ExitType.DEADLINE, exit_price)
+                        bot = executor.bot
+                        result = "✅" if bot.trades[-1].outcome == "won" else "❌"
+                        pnl = bot.trades[-1].pnl or 0
+                        print(f"  [BOT] period-end exit: {result} (${pnl:+.2f}) deadline | "
+                              f"cumulative: ${bot.total_pnl:+.2f} | "
+                              f"{bot.wins}W/{bot.losses}L",
+                              flush=True)
+                    else:
+                        executor.cancel()
+                        print(f"  [BOT] period-end cancel (no PM price)", flush=True)
 
                 # Reset strategy state for new period
                 strat_state.reset(state.period_start_ts)
@@ -249,40 +269,33 @@ async def bot_loop(
                       f"| strike={'${:,.2f}'.format(state.strike) if state.strike else '?'}",
                       flush=True)
 
-            # ── Settlement check (wait a bit after period ends for oracle) ──
-            if pending_settlement_ts > 0:
-                # Wait 45 seconds after period end for oracle to report
-                period_end = pending_settlement_ts + 900
-                wait_elapsed = now - period_end
-                if wait_elapsed > 45:
-                    # Log verbose details every 30s after 90s of waiting
-                    verbose = wait_elapsed > 90 and (now - last_settlement_log) > 30
-                    outcome = fetch_period_outcome(coin, pending_settlement_ts, verbose=verbose)
-                    if verbose:
-                        last_settlement_log = now
-                    if outcome:
-                        executor.settle(outcome)
+            # ── TP/SL EXIT CHECK (every tick while position is open) ──
+            if executor.bot.current_side and state.pm_up is not None:
+                pm_sane = 0.02 < state.pm_up < 0.98
+                if pm_sane:
+                    exit_type = strategy.check_exit(strat_state, state.pm_up)
+                    if exit_type != strategy.ExitType.NONE:
+                        side = executor.bot.current_side
+                        exit_price = state.pm_up if side == "Up" else (1.0 - state.pm_up)
+                        entry = executor.bot.trades[-1].entry_price if executor.bot.trades else 0
+
+                        executor.exit_position(exit_type, exit_price)
                         bot = executor.bot
-                        result = "✅ WON" if bot.trades[-1].outcome == "won" else "❌ LOST"
+                        result = "✅" if bot.trades[-1].outcome == "won" else "❌"
                         pnl = bot.trades[-1].pnl or 0
-                        print(f"  [BOT] settlement: {result} (${pnl:+.2f}) | "
+                        print(f"\n  [BOT] {result} EXIT [{exit_type.value.upper()}]: "
+                              f"{side} entry={entry:.3f} exit={exit_price:.3f} "
+                              f"P&L=${pnl:+.2f} | "
                               f"cumulative: ${bot.total_pnl:+.2f} | "
                               f"{bot.wins}W/{bot.losses}L ({bot.win_rate:.0%})",
                               flush=True)
-                        pending_settlement_ts = 0
-                    elif wait_elapsed > 600:
-                        # Give up after 10 minutes — oracle may not be available
-                        print(f"  [BOT] settlement timeout for period {pending_settlement_ts} "
-                              f"(waited {wait_elapsed:.0f}s), skipping", flush=True)
-                        executor.cancel()
-                        pending_settlement_ts = 0
 
             # ── Snapshot collection ──
             if state.period_start_ts > 0 and state.pm_up is not None:
                 elapsed = now - state.period_start_ts
                 current_minute = elapsed / 60.0
 
-                # Collect snapshots every ~30 seconds starting at minute 3.5
+                # Collect snapshots every ~30 seconds starting at minute 2.5
                 if (current_minute >= strategy.MIN_SNAPSHOT_MINUTE and
                     current_minute <= 14.0 and
                     current_minute - last_snapshot_minute >= 0.4):
@@ -296,8 +309,12 @@ async def bot_loop(
             if not strat_state.signal_fired and state.period_start_ts > 0:
                 signal = strategy.evaluate(strat_state)
                 if signal:
+                    tp_target = signal.entry_price + strategy.TAKE_PROFIT
+                    sl_target = signal.entry_price - strategy.STOP_LOSS
                     print(f"\n  [BOT] 🎯 SIGNAL: {signal.signal.value} → {signal.side} "
-                          f"@ {signal.entry_price:.3f} | {signal.confidence}",
+                          f"@ {signal.entry_price:.3f} | "
+                          f"TP={tp_target:.3f} SL={sl_target:.3f} | "
+                          f"{signal.confidence}",
                           flush=True)
 
                     # Execute!
@@ -404,7 +421,7 @@ async def main():
     log(f"  Coin: {args.coin}")
     log(f"  Mode: {mode}")
     log(f"  Size: ${args.size:.0f}/trade")
-    log(f"  Strategy: Combined (trend_confirm + reversal)")
+    log(f"  Strategy: Momentum Scalp v2 (TP={strategy.TAKE_PROFIT:.2f} SL={strategy.STOP_LOSS:.2f})")
     log(f"  Display: {'headless' if args.headless else 'Rich dashboard'}")
     log()
 
