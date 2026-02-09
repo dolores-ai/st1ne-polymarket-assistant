@@ -130,10 +130,9 @@ async def trading_loop(state: feeds.State):
             else:
                 signal = "WAIT"
             
-            if signal != last_signal:
+            if signal != last_signal and signal != "WAIT":
                 last_signal = signal
-                if signal != "WAIT":
-                    print(f"\n🎯 SIGNAL: {signal} | Spread: {spread*100:+.1f}%\n")
+                print(f"\n🎯 SIGNAL: {signal} | Spread: {spread*100:+.1f}%\n")
         
         await asyncio.sleep(10)
 
@@ -161,7 +160,9 @@ async def main():
     if state.pm_up_id:
         console.print(f"  [PM] Up   → {state.pm_up_id[:24]}…")
         console.print(f"  [PM] Down → {state.pm_dn_id[:24]}…")
-        console.print(f"  [PM] UP Price: ${state.pm_up:.4f} | DOWN: ${state.pm_down:.4f}\n")
+        pm_up_price = f"${state.pm_up:.4f}" if state.pm_up else "N/A"
+        pm_dn_price = f"${state.pm_down:.4f}" if state.pm_down else "N/A"
+        console.print(f"  [PM] UP Price: {pm_up_price} | DOWN: {pm_dn_price}\n")
     else:
         console.print("  [yellow][PM] no market for this coin/timeframe – prices will not show[/yellow]")
 
@@ -177,6 +178,7 @@ async def main():
         feeds.binance_feed(binance_sym, kline_iv, state),
         feeds.pm_feed(state),
         display_loop(state, coin, tf),
+        trading_loop(state),
     )
 
 
