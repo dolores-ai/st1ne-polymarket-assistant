@@ -36,15 +36,17 @@ class PriceData:
     """All price data in one place"""
     def __init__(self):
         self.binance = {"price": 0, "bid": 0, "ask": 0}
-        self.chainlink = {"price": 0, "change_pct": 0}
+        self.chainlink = {"price": 0, "change_pct": 0, "start_price": 0}
         self.polymarket = {"up_price": 0, "down_price": 0, "up_id": "", "down_id": ""}
         self.timestamp = 0
+        self.start_recorded = False
     
     def update(self):
         self.timestamp = time.time()
 
 
 prices = PriceData()
+state = None  # Global state reference
 
 
 async def fetch_chainlink():
@@ -59,15 +61,28 @@ async def fetch_chainlink():
             timeout=5
         )
         data = resp.json()
-        prices.chainlink["price"] = data.get("bitcoin", {}).get("usd", 0)
+        cl_price = data.get("bitcoin", {}).get("usd", 0)
+        prices.chainlink["price"] = cl_price
         prices.chainlink["change_pct"] = data.get("bitcoin", {}).get("usd_24h_change", 0)
+        
+        # Record starting price on first fetch
+        if cl_price > 0 and not prices.start_recorded:
+            prices.chainlink["start_price"] = cl_price
+            prices.start_recorded = True
+            print(f"\n🎯 MARKET OPEN: ${cl_price:,.2f} (Price to beat)\n")
     except:
         # Fallback to Binance
         try:
             resp = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=5)
             data = resp.json()
-            prices.chainlink["price"] = float(data.get("lastPrice", 0))
+            cl_price = float(data.get("lastPrice", 0))
+            prices.chainlink["price"] = cl_price
             prices.chainlink["change_pct"] = float(data.get("priceChangePercent", 0))
+            
+            if cl_price > 0 and not prices.start_recorded:
+                prices.chainlink["start_price"] = cl_price
+                prices.start_recorded = True
+                print(f"\n🎯 MARKET OPEN: ${cl_price:,.2f} (Price to beat)\n")
         except:
             pass
 
@@ -207,20 +222,40 @@ async def trading_loop(state: feeds.State):
         await asyncio.sleep(10)
 
 
-async def print_prices():
-    """Print price summary"""
+async def print_prices(state: feeds.State):
+    """Print price summary with trading signals"""
     while True:
         try:
-            print(f"\n{'='*50}")
-            print(f"[PRICES @ {datetime.now().strftime('%H:%M:%S')}]")
-            print(f"{'='*50}")
-            print(f"  Binance: ${prices.binance['price']:,.2f}")
-            print(f"           Bid: ${prices.binance['bid']:,.2f} | Ask: ${prices.binance['ask']:,.2f}")
-            print(f"  Chainlink: ${prices.chainlink['price']:,.2f} ({prices.chainlink['change_pct']:+.1f}% 24h)")
-            print(f"{'='*50}\n")
-        except:
-            pass
-        await asyncio.sleep(30)
+            start_price = prices.chainlink.get("start_price", 0)
+            current_price = prices.chainlink.get("price", 0)
+            price_change = ((current_price - start_price) / start_price * 100) if start_price > 0 and current_price > 0 else 0
+            
+            pm_up = state.pm_up if hasattr(state, 'pm_up') and state.pm_up else 0
+            pm_down = state.pm_dn if hasattr(state, 'pm_dn') and state.pm_dn else 0
+            
+            # Calculate edge
+            actual_implied = (price_change / 100) + 0.5
+            pm_implied = pm_up
+            edge = pm_implied - actual_implied
+            
+            print(f"\n{'='*55}")
+            print(f"📊 TRADING DASHBOARD @ {datetime.now().strftime('%H:%M:%S')}")
+            print(f"{'='*55}")
+            print(f"  💰 CHAINLINK (Price to Beat)")
+            print(f"     Start: ${start_price:,.2f}" if start_price > 0 else "     Start: Waiting...")
+            print(f"     Now:   ${current_price:,.2f}" if current_price > 0 else "     Now:   Waiting...")
+            print(f"     Δ:    {price_change:+.2f}%")
+            print(f"\n  📈 POLYMARKET")
+            print(f"     UP:   {pm_up*100:.1f}% | DOWN: {pm_down*100:.1f}%")
+            print(f"\n  🎯 SIGNALS")
+            print(f"     PM Implied: {pm_implied*100:.1f}%")
+            print(f"     Actual Δ:   {actual_implied*100:.1f}%")
+            print(f"     Edge:       {edge*100:+.1f}% {'✅ BUY UP' if edge < -0.015 else '✅ BUY DOWN' if edge > 0.015 else '⚪ WAIT'}")
+            print(f"{'='*55}\n")
+        except Exception as e:
+            print(f"Display error: {e}")
+        
+        await asyncio.sleep(15)
 
 
 async def command_input(state: feeds.State):
@@ -338,7 +373,7 @@ async def main():
         display_loop(state, coin, tf),
         trading_loop(state),
         price_poller(binance_sym),
-        print_prices(),
+        print_prices(state),
         command_input(state),
     )
 
