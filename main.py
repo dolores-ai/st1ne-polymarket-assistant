@@ -120,7 +120,7 @@ async def trading_loop(state: feeds.State):
     last_signal = None
     
     while True:
-        if state.pm_up and state.pm_down:
+        if state.pm_up and state.pm_dn:
             spread = state.pm_up - 0.5
             
             if spread < -min_spread and last_signal != "BUY_UP":
@@ -161,7 +161,7 @@ async def main():
         console.print(f"  [PM] Up   → {state.pm_up_id[:24]}…")
         console.print(f"  [PM] Down → {state.pm_dn_id[:24]}…")
         pm_up_price = f"${state.pm_up:.4f}" if state.pm_up else "N/A"
-        pm_dn_price = f"${state.pm_down:.4f}" if state.pm_down else "N/A"
+        pm_dn_price = f"${state.pm_dn:.4f}" if state.pm_dn else "N/A"
         console.print(f"  [PM] UP Price: {pm_up_price} | DOWN: {pm_dn_price}\n")
     else:
         console.print("  [yellow][PM] no market for this coin/timeframe – prices will not show[/yellow]")
