@@ -223,6 +223,74 @@ async def print_prices():
         await asyncio.sleep(30)
 
 
+async def command_input(state: feeds.State):
+    """Handle keyboard commands with feedback"""
+    last_trade_info = {"side": None, "price": 0, "size": 0, "time": 0}
+    
+    while True:
+        try:
+            cmd = input().strip().upper()
+            
+            if cmd == "Q" or cmd == "QUIT":
+                print("\n👋 Stopping bot...")
+                os._exit(0)
+            
+            elif cmd == "UP":
+                if state.pm_up_id and state.pm_up:
+                    print(f"\n{'='*50}")
+                    print("🚀 BUYING UP")
+                    print(f"{'='*50}")
+                    print(f"  Token: {state.pm_up_id[:32]}...")
+                    print(f"  Price: ${state.pm_up:.4f}")
+                    print(f"  Size:  ~{5/state.pm_up:.2f} shares ($5)")
+                    print(f"{'='*50}")
+                    
+                    trading_bot.execute(state.pm_up_id, "BUY", state.pm_up, 5.0)
+                    
+                    last_trade_info = {"side": "UP", "price": state.pm_up, "size": 5.0, "time": time.time()}
+                else:
+                    print("❌ No UP market data")
+            
+            elif cmd == "DN" or cmd == "DOWN":
+                if state.pm_dn_id and state.pm_dn:
+                    print(f"\n{'='*50}")
+                    print("🚀 BUYING DOWN")
+                    print(f"{'='*50}")
+                    print(f"  Token: {state.pm_dn_id[:32]}...")
+                    print(f"  Price: ${state.pm_dn:.4f}")
+                    print(f"  ize:  ~{5/state.pm_dn:.2f} shares ($5)")
+                    print(f"{'='*50}")
+                    
+                    trading_bot.execute(state.pm_dn_id, "BUY", state.pm_dn, 5.0)
+                    
+                    last_trade_info = {"side": "DOWN", "price": state.pm_dn, "size": 5.0, "time": time.time()}
+                else:
+                    print("❌ No DOWN market data")
+            
+            elif cmd == "STATUS":
+                print(f"\n{'='*50}")
+                print("[TRADE STATUS]")
+                print(f"{'='*50}")
+                print(f"  Binance: ${prices.binance['price']:,.2f}")
+                print(f"  PM UP:   {state.pm_up*100:.1f}% | DOWN: {state.pm_down*100:.1f}%")
+                
+                if last_trade_info["time"] > 0:
+                    elapsed = time.time() - last_trade_info["time"]
+                    print(f"\n  Last Trade: {last_trade_info['side']} @ ${last_trade_info['price']:.4f}")
+                    print(f"  Time ago:   {elapsed:.0f}s")
+                print(f"{'='*50}\n")
+            
+            else:
+                print("Unknown command. Use: UP, DN, STATUS, Q")
+        
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"Input error: {e}")
+        
+        await asyncio.sleep(0.1)
+
+
 async def main():
     console.print("\n[bold magenta]═══ CRYPTO PREDICTION DASHBOARD ═══[/bold magenta]\n")
 
@@ -261,6 +329,7 @@ async def main():
         trading_loop(state),
         price_poller(binance_sym),
         print_prices(),
+        command_input(state),
     )
 
 
