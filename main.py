@@ -32,6 +32,60 @@ PROXY_WALLET = os.environ.get("PROXY_WALLET", "")
 PROXY_URL = os.environ.get("PROXY_URL", "")
 
 
+class PriceData:
+    """All price data in one place"""
+    def __init__(self):
+        self.binance = {"price": 0, "bid": 0, "ask": 0}
+        self.chainlink = {"price": 0, "change_pct": 0}
+        self.polymarket = {"up_price": 0, "down_price": 0, "up_id": "", "down_id": ""}
+        self.timestamp = 0
+    
+    def update(self):
+        self.timestamp = time.time()
+
+
+prices = PriceData()
+
+
+async def fetch_chainlink():
+    """Fetch Chainlink BTC/USD price"""
+    # Chainlink BTC/USD feed on mainnet
+    # Using direct contract call or public API
+    
+    # Method: Use Coingecko as proxy for Chainlink (they use similar feeds)
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true",
+            timeout=5
+        )
+        data = resp.json()
+        prices.chainlink["price"] = data.get("bitcoin", {}).get("usd", 0)
+        prices.chainlink["change_pct"] = data.get("bitcoin", {}).get("usd_24h_change", 0)
+    except:
+        # Fallback to Binance
+        try:
+            resp = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=5)
+            data = resp.json()
+            prices.chainlink["price"] = float(data.get("lastPrice", 0))
+            prices.chainlink["change_pct"] = float(data.get("priceChangePercent", 0))
+        except:
+            pass
+
+
+async def fetch_binance(symbol: str):
+    """Fetch Binance price"""
+    try:
+        resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", timeout=5)
+        prices.binance["price"] = float(resp.json().get("price", 0))
+        
+        # Get order book for bid/ask
+        ob = requests.get(f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=5", timeout=5).json()
+        prices.binance["bid"] = float(ob["bids"][0][0]) if ob.get("bids") else 0
+        prices.binance["ask"] = float(ob["asks"][0][0]) if ob.get("asks") else 0
+    except Exception as e:
+        print(f"Binance error: {e}")
+
+
 class TradingBot:
     """Integrated trading bot"""
     def __init__(self):
@@ -39,7 +93,6 @@ class TradingBot:
         self.last_trade = 0
         
     def init(self):
-        """Initialize CLOB client"""
         if not POLYMARKET_PRIVATE_KEY:
             return False
         try:
@@ -63,12 +116,11 @@ class TradingBot:
             return False
     
     def execute(self, token_id: str, side: str, price: float, amount: float = 5.0):
-        """Execute trade"""
         if not self.client:
             print("❌ CLOB not initialized")
             return
         
-        if time.time() - self.last_trade < 300:  # 5 min cooldown
+        if time.time() - self.last_trade < 300:
             print("⏳ Cooldown active")
             return
         
@@ -114,6 +166,15 @@ async def display_loop(state: feeds.State, coin: str, tf: str):
             await asyncio.sleep(config.REFRESH)
 
 
+async def price_poller(symbol: str):
+    """Poll all prices"""
+    while True:
+        await fetch_binance(symbol)
+        await fetch_chainlink()
+        prices.update()
+        await asyncio.sleep(5)
+
+
 async def trading_loop(state: feeds.State):
     """Background trading signals"""
     min_spread = 0.015  # 1.5%
@@ -121,33 +182,54 @@ async def trading_loop(state: feeds.State):
     
     while True:
         if state.pm_up and state.pm_dn:
+            # Spread from 50% baseline
             spread = state.pm_up - 0.5
             
-            if spread < -min_spread and last_signal != "BUY_UP":
+            # Also compare to Chainlink 24h change as sentiment
+            cl_change = prices.chainlink.get("change_pct", 0) / 100
+            
+            # Adjusted spread considering sentiment
+            adjusted_spread = spread - (cl_change * 0.1)  # Small adjustment
+            
+            if adjusted_spread < -min_spread:
                 signal = "BUY_UP"
-            elif spread > min_spread and last_signal != "BUY_DOWN":
+            elif adjusted_spread > min_spread:
                 signal = "BUY_DOWN"
             else:
                 signal = "WAIT"
             
             if signal != last_signal and signal != "WAIT":
                 last_signal = signal
-                print(f"\n🎯 SIGNAL: {signal} | Spread: {spread*100:+.1f}%\n")
+                print(f"\n🎯 SIGNAL: {signal}")
+                print(f"   PM UP: {state.pm_up*100:.1f}% | CL 24h: {cl_change*100:.1f}%")
+                print(f"   Spread: {spread*100:+.1f}%\n")
         
         await asyncio.sleep(10)
+
+
+async def print_prices():
+    """Print price summary"""
+    while True:
+        try:
+            print(f"\n{'='*50}")
+            print(f"[PRICES @ {datetime.now().strftime('%H:%M:%S')}]")
+            print(f"{'='*50}")
+            print(f"  Binance: ${prices.binance['price']:,.2f}")
+            print(f"           Bid: ${prices.binance['bid']:,.2f} | Ask: ${prices.binance['ask']:,.2f}")
+            print(f"  Chainlink: ${prices.chainlink['price']:,.2f} ({prices.chainlink['change_pct']:+.1f}% 24h)")
+            print(f"{'='*50}\n")
+        except:
+            pass
+        await asyncio.sleep(30)
 
 
 async def main():
     console.print("\n[bold magenta]═══ CRYPTO PREDICTION DASHBOARD ═══[/bold magenta]\n")
 
-    # Initialize trading if keys present
-    if POLYMARKET_PRIVATE_KEY:
-        if trading_bot.init():
-            console.print("  [green]✅ Trading enabled[/green]")
-        else:
-            console.print("  [yellow]⚠️ Trading disabled (no API key)[/yellow]")
+    if POLYMARKET_PRIVATE_KEY and trading_bot.init():
+        console.print("  [green]✅ Trading enabled[/green]")
     else:
-        console.print("  [yellow]⚠️ Set POLYMARKET_PRIVATE_KEY to enable trading[/yellow]")
+        console.print("  [yellow]⚠️ Set POLYMARKET_PRIVATE_KEY for trading[/yellow]")
 
     coin = pick("Select coin:", config.COINS)
     tf = pick("Select timeframe:", config.TIMEFRAMES)
@@ -155,16 +237,14 @@ async def main():
     console.print(f"\n[bold green]Starting {coin} {tf} …[/bold green]\n")
 
     state = feeds.State()
-
     state.pm_up_id, state.pm_dn_id = feeds.fetch_pm_tokens(coin, tf)
+    
     if state.pm_up_id:
         console.print(f"  [PM] Up   → {state.pm_up_id[:24]}…")
         console.print(f"  [PM] Down → {state.pm_dn_id[:24]}…")
-        pm_up_price = f"${state.pm_up:.4f}" if state.pm_up else "N/A"
-        pm_dn_price = f"${state.pm_dn:.4f}" if state.pm_dn else "N/A"
-        console.print(f"  [PM] UP Price: {pm_up_price} | DOWN: {pm_dn_price}\n")
+        console.print("  [PM] Waiting for WebSocket data...\n")
     else:
-        console.print("  [yellow][PM] no market for this coin/timeframe – prices will not show[/yellow]")
+        console.print("  [yellow][PM] no market for this coin/timeframe[/yellow]")
 
     binance_sym = config.COIN_BINANCE[coin]
     kline_iv = config.TF_KLINE[tf]
@@ -179,6 +259,8 @@ async def main():
         feeds.pm_feed(state),
         display_loop(state, coin, tf),
         trading_loop(state),
+        price_poller(binance_sym),
+        print_prices(),
     )
 
 
